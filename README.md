@@ -42,6 +42,8 @@ is reproducible on its own with `--episodes 1 --seed <n>`.
 
 ## Web simulation
 
+**Live demo:** https://neuromorphic-logic-controller-srikar-velas-projects.vercel.app
+
 `web/` is a browser visualization of the same controller — a React + Vite +
 TypeScript app with a Canvas view, play/pause/step controls, and a
 randomize-course button. It runs a TypeScript port of the FSM
