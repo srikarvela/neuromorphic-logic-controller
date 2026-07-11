@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Icarus Verilog
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iverilog
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -r sim/requirements.txt
+
+      - name: Run FSM unit tests
+        run: make unit-tb
+
+      - name: Run one closed-loop cosim episode
+        run: make cosim
+
+      - name: Run a quick randomized stress-test smoke check
+        run: ./scripts/run_stress_test.sh --episodes 5 --seed 0
+
+      - name: Upload trajectory plot
+        uses: actions/upload-artifact@v4
+        with:
+          name: cosim-results
+          path: results/
