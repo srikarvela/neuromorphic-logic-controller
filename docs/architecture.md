@@ -99,12 +99,32 @@ skipped here since Icarus + one-shot `vvp` runs needed no extra toolchain.
   distinct reaction — moving obstacles around will change how many actually
   get "seen."
 
+## Randomized verification: `sim/stress_test.py`
+
+The unit testbench proves individual transitions are correct; it doesn't
+say much about whether the reactive controller actually avoids obstacles in
+general. `sim/stress_test.py` runs many independently-seeded random
+obstacle courses through the same real `vvp`-compiled FSM used by
+`cosim_driver.py` (no shortcuts — it calls `cosim_driver.run_fsm_step`
+directly) and reports a collision rate plus how many episodes triggered a
+turn or brake at all. Obstacle y-position is kept close to the agent's
+nominal straight-line path deliberately — a wide spread mostly produces
+obstacles that were never a threat, which would make the sweep meaningless.
+Each episode is fully determined by its seed, so a failing seed can be
+replayed in isolation.
+
+Brake engagements are rare in this sweep by construction: the random
+generator places at most one obstacle per x-band, and `BRAKE_S` requires
+simultaneous bilateral criticality, which mostly needs two obstacles close
+together on opposite sides. That case is covered directly by the unit
+tests instead.
+
 ## Directory layout
 
 ```
 rtl/     synthesizable SystemVerilog (fsm_controller.sv)
 tb/      testbenches (unit + per-step cosim)
-sim/     Python agent/environment model and the cosim driver
+sim/     Python agent/environment model, cosim driver, and stress test
 scripts/ build/run helpers wrapping iverilog/vvp
 build/   compiled .vvp binaries and .vcd waveforms (gitignored)
 results/ CSV logs and trajectory plots from cosim runs (gitignored)

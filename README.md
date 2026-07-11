@@ -25,11 +25,20 @@ make unit-tb
 
 # Build the cosim testbench and run a full closed-loop episode
 make cosim
+
+# Run a randomized multi-episode verification sweep
+make stress-test
 ```
 
 `make cosim` writes `results/trajectory_log.csv` and `results/trajectory.png`
 — the agent's path through a small obstacle field, driven step-by-step by
 the SystemVerilog FSM.
+
+`make stress-test` runs 25 independently-seeded random obstacle courses
+through the same real hardware loop and reports the collision rate to
+`results/stress_test_summary.csv`. Pass extra args through
+`./scripts/run_stress_test.sh --episodes 100 --seed 42`; any failing seed
+is reproducible on its own with `--episodes 1 --seed <n>`.
 
 ## Layout
 
