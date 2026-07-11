@@ -61,6 +61,20 @@ module tb_fsm_controller;
     end
   endtask
 
+  // Whitebox check on the internal brake_timer register (hierarchical
+  // reference into the DUT) -- used to confirm the timer is reloaded, not
+  // stale, whenever BRAKE_S is (re-)entered.
+  task automatic check_timer(input int expected, input string label);
+    checks++;
+    if (dut.brake_timer !== expected) begin
+      errors++;
+      $display("[FAIL] %0t %s: expected brake_timer=%0d got %0d", $time, label, expected,
+                dut.brake_timer);
+    end else begin
+      $display("[PASS] %0t %s: brake_timer=%0d", $time, label, dut.brake_timer);
+    end
+  endtask
+
   initial begin
     $dumpfile("build/tb_fsm_controller.vcd");
     $dumpvars(0, tb_fsm_controller);
@@ -105,6 +119,50 @@ module tb_fsm_controller;
       step_check(2'd3, $sformatf("brake timer countdown %0d", i));
     end
     step_check(2'd0, "brake timer expires -> FORWARD");
+
+    // --- Edge case: BRAKE preempts an in-progress TURN_R with a fresh timer,
+    // not whatever was left over from any earlier brake.
+    drive(3, 0);
+    step_check(2'd2, "obstacle left -> TURN_R (preempt setup)");
+    drive(3, 3);
+    step_check(2'd3, "critical front mid-TURN_R -> BRAKE preempts turn");
+    check_timer(BRAKE_CYCLES, "timer freshly loaded on TURN_R->BRAKE preemption");
+
+    drive(0, 0);
+    for (int i = 0; i < BRAKE_CYCLES; i++) begin
+      step_check(2'd3, $sformatf("preempt-from-TURN_R countdown %0d", i));
+    end
+    step_check(2'd0, "preempt-from-TURN_R brake expires -> FORWARD");
+
+    // --- Same edge case, mirrored: BRAKE preempts an in-progress TURN_L.
+    drive(0, 3);
+    step_check(2'd1, "obstacle right -> TURN_L (preempt setup)");
+    drive(3, 3);
+    step_check(2'd3, "critical front mid-TURN_L -> BRAKE preempts turn");
+    check_timer(BRAKE_CYCLES, "timer freshly loaded on TURN_L->BRAKE preemption");
+
+    drive(0, 0);
+    for (int i = 0; i < BRAKE_CYCLES; i++) begin
+      step_check(2'd3, $sformatf("preempt-from-TURN_L countdown %0d", i));
+    end
+    step_check(2'd0, "preempt-from-TURN_L brake expires -> FORWARD");
+
+    // --- Edge case: if the obstacle is still critical exactly when the
+    // brake timer expires, the FSM takes one cycle in FORWARD before
+    // critical_front sends it straight back into a freshly-timed BRAKE.
+    // This is a known one-cycle flicker, not a bug -- see docs/architecture.md.
+    drive(3, 3);
+    step_check(2'd3, "critical sustained -> BRAKE");
+    check_timer(BRAKE_CYCLES, "timer freshly loaded entering sustained BRAKE");
+
+    for (int i = 0; i < BRAKE_CYCLES; i++) begin
+      step_check(2'd3, $sformatf("sustained-critical countdown %0d", i));
+    end
+    step_check(2'd0, "timer expiry blip -> FORWARD even though still critical");
+    step_check(2'd3, "critical still present -> re-enters BRAKE next cycle");
+    check_timer(BRAKE_CYCLES, "timer freshly loaded on flicker re-entry");
+
+    drive(0, 0);
 
     $display("----------------------------------------");
     if (errors == 0) $display("ALL %0d CHECKS PASSED", checks);

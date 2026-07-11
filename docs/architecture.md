@@ -34,7 +34,16 @@ Inputs `ev_left`/`ev_right` are 2-bit event-rate buckets (0-3). Thresholds:
 Turning states have hysteresis: once turning, the FSM holds that state until
 the triggering side's event rate drops back under `OBSTACLE_THRESH`, not
 just for one clean cycle. `BRAKE_S` always takes priority and interrupts a
-turn if a critical front reading appears mid-turn.
+turn if a critical front reading appears mid-turn, reloading `brake_timer`
+to `BRAKE_CYCLES` rather than carrying over a stale value.
+
+**Known one-cycle flicker:** the countdown-expiry check
+(`brake_timer == 0 -> FORWARD`) doesn't re-check `critical_front`. If the
+obstacle is still critical exactly when the timer hits zero, the FSM spends
+one cycle in `FORWARD` before `critical_front` sends it straight back into a
+freshly-timed `BRAKE_S` the next cycle. This is intentional (keeping the
+countdown-expiry case simple) and is covered by the "flicker re-entry" test
+in `tb/tb_fsm_controller.sv`, not a bug to fix.
 
 ## Verification: `tb/tb_fsm_controller.sv`
 
