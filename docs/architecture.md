@@ -119,6 +119,34 @@ simultaneous bilateral criticality, which mostly needs two obstacles close
 together on opposite sides. That case is covered directly by the unit
 tests instead.
 
+## Web simulation
+
+`web/` is a browser-based visualization, built because real SystemVerilog
+can't execute client-side without extra toolchain (WASM). Architecture:
+
+- `web/engine/fsm.ts` — a TypeScript port of `rtl/fsm_controller.sv`'s
+  transition logic. It is **not** the RTL itself; it's a reference model
+  kept honest by `web/engine/fsm.test.ts`, which replays the exact same
+  30-step vector sequence (directed + edge cases) as
+  `tb/tb_fsm_controller.sv` and asserts identical results.
+- `web/engine/agentSim.ts` — a TypeScript port of `sim/agent_sim.py`.
+- `web/engine/FsmEngine.ts` — a small `FsmEngine` interface
+  (`step(state, timer, evLeft, evRight)`) that the UI depends on instead of
+  `fsm.ts` directly. `TsFsmEngine` is the only implementation today.
+- `web/engine/simulationLoop.ts` — the real-time counterpart to
+  `sim/cosim_driver.py::run_episode`, advancing one control tick per call
+  instead of batch-running to completion.
+- `web/frontend/` — React + Canvas UI (play/pause/step, randomize course,
+  live event-rate bars and state badge).
+
+**Planned: real RTL in the browser.** The `FsmEngine` interface exists so a
+`WasmFsmEngine` can be added later without touching the UI — compile
+`rtl/fsm_controller.sv` through Verilator to C++, then through Emscripten
+to WebAssembly, wrapped behind the same `step()` signature. Neither
+Verilator nor an Emscripten SDK is set up yet; this is a larger toolchain
+lift than the TypeScript port and is deliberately deferred rather than
+blocking the visualization on it.
+
 ## Directory layout
 
 ```
@@ -128,4 +156,5 @@ sim/     Python agent/environment model, cosim driver, and stress test
 scripts/ build/run helpers wrapping iverilog/vvp
 build/   compiled .vvp binaries and .vcd waveforms (gitignored)
 results/ CSV logs and trajectory plots from cosim runs (gitignored)
+web/     browser visualization (React + Vite + TS), see above
 ```

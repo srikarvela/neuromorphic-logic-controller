@@ -40,6 +40,25 @@ through the same real hardware loop and reports the collision rate to
 `./scripts/run_stress_test.sh --episodes 100 --seed 42`; any failing seed
 is reproducible on its own with `--episodes 1 --seed <n>`.
 
+## Web simulation
+
+`web/` is a browser visualization of the same controller — a React + Vite +
+TypeScript app with a Canvas view, play/pause/step controls, and a
+randomize-course button. It runs a TypeScript port of the FSM
+(`web/engine/fsm.ts`), parity-tested against the exact same vectors as
+`tb/tb_fsm_controller.sv` (`web/engine/fsm.test.ts`), rather than the real
+`.sv` — see [`docs/architecture.md`](docs/architecture.md#web-simulation)
+for why, and the planned path to running the actual RTL client-side via
+WASM.
+
+```bash
+cd web
+npm install
+npm run dev     # http://localhost:5173
+npm test        # parity tests
+npm run build   # production bundle
+```
+
 ## Layout
 
 ```
@@ -48,4 +67,5 @@ tb/      unit testbench + per-step hardware-in-the-loop testbench
 sim/     Python agent/environment model and the cosim driver
 scripts/ shell wrappers around iverilog/vvp
 docs/    architecture notes
+web/     browser visualization (React + Vite + TS)
 ```
