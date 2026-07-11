@@ -9,6 +9,12 @@ transcript
 obj_dir/
 *.jou
 *.log
+build/*.vvp
+build/*.vcd
+
+# cosim outputs
+results/*.csv
+results/*.png
 
 # Python
 __pycache__/
