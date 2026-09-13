@@ -1,10 +1,16 @@
 """Randomized multi-episode verification sweep.
 
 Runs many independently-seeded random obstacle courses through the real
-compiled FSM (via cosim_driver.run_fsm_step, i.e. actual vvp invocations,
-not a software re-implementation of the controller) and reports the
-collision rate. Each episode is reproducible from its seed alone, so a
-failing run can be replayed with --episodes 1 --seed <n>.
+controller pipeline -- RTL under Icarus, or the FPGA on the PYNQ-Z2 -- and
+reports the collision rate. Decisions always come from the hardware; the
+Python golden model only cross-checks them. Each episode is reproducible
+from its seed alone, so a failing run can be replayed with
+--episodes 1 --seed <n>.
+
+With --noise N the event camera adds Poisson background events, which is
+the sweep's way of probing how the fixed thresholds hold up against sensor
+noise (the rate-fed parity check is skipped in that mode, the golden-model
+check is not).
 """
 from __future__ import annotations
 
@@ -15,8 +21,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from agent_sim import ACTION_NAMES, Agent, Environment, Obstacle, apply_action, check_collision, sense
-from cosim_driver import run_fsm_step
+from agent_sim import Environment, Obstacle
+from cosim_driver import run_episode
+from engines import Engine, add_engine_args, engine_from_args
+from event_camera import EventCamera, EventCameraConfig
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -37,18 +45,15 @@ def random_environment(rng: random.Random) -> Environment:
     return Environment(obstacles=obstacles)
 
 
-def run_single_episode(env: Environment, max_steps: int) -> dict:
-    agent = Agent()
-    state, brake_timer = 0, 0
+def run_single_episode(engine: Engine, env: Environment, max_steps: int, camera: EventCamera,
+                       check: bool = True) -> dict:
+    log, _ = run_episode(engine, env=env, max_steps=max_steps, camera=camera, check=check)
+
     brake_engagements = 0
     turn_engagements = 0
     prev_state = 0
-
-    for step in range(max_steps):
-        ev_left, ev_right = sense(agent, env)
-        state, brake_timer = run_fsm_step(state, brake_timer, ev_left, ev_right)
-        apply_action(agent, state)
-
+    for row in log:
+        state = row["state"]
         if state != prev_state:
             if state == 3:
                 brake_engagements += 1
@@ -56,61 +61,58 @@ def run_single_episode(env: Environment, max_steps: int) -> dict:
                 turn_engagements += 1
         prev_state = state
 
-        hit = check_collision(agent, env)
-        if hit is not None:
-            return {
-                "collision": True,
-                "steps": step + 1,
-                "turn_engagements": turn_engagements,
-                "brake_engagements": brake_engagements,
-                "final_x": round(agent.x, 2),
-                "final_y": round(agent.y, 2),
-            }
-
+    last = log[-1]
     return {
-        "collision": False,
-        "steps": max_steps,
+        "collision": len(log) < max_steps,
+        "steps": len(log),
         "turn_engagements": turn_engagements,
         "brake_engagements": brake_engagements,
-        "final_x": round(agent.x, 2),
-        "final_y": round(agent.y, 2),
+        "final_x": round(last["x"], 2),
+        "final_y": round(last["y"], 2),
     }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    add_engine_args(parser)
     parser.add_argument("--episodes", type=int, default=25)
     parser.add_argument("--max-steps", type=int, default=60)
     parser.add_argument("--seed", type=int, default=0, help="base seed; episode i uses seed+i")
-    parser.add_argument(
-        "--out", type=Path, default=ROOT / "results" / "stress_test_summary.csv"
-    )
+    parser.add_argument("--noise", type=float, default=0.0,
+                        help="mean background DVS events per hemisphere per window (default 0)")
+    parser.add_argument("--out", type=Path, default=ROOT / "results" / "stress_test_summary.csv")
     args = parser.parse_args()
 
+    engine = engine_from_args(args)
+    print(f"Engine: {engine.name}")
     rows = []
     collisions = 0
-    for i in range(args.episodes):
-        episode_seed = args.seed + i
-        rng = random.Random(episode_seed)
-        env = random_environment(rng)
-        result = run_single_episode(env, args.max_steps)
-        result["seed"] = episode_seed
-        result["n_obstacles"] = len(env.obstacles)
-        rows.append(result)
+    try:
+        for i in range(args.episodes):
+            episode_seed = args.seed + i
+            rng = random.Random(episode_seed)
+            env = random_environment(rng)
+            camera = EventCamera(EventCameraConfig(noise_rate=args.noise), seed=episode_seed)
+            result = run_single_episode(engine, env, args.max_steps, camera, check=not args.no_check)
+            result["seed"] = episode_seed
+            result["n_obstacles"] = len(env.obstacles)
+            rows.append(result)
 
-        if result["collision"]:
-            collisions += 1
-            print(
-                f"[COLLISION] seed={episode_seed} step={result['steps']} "
-                f"n_obstacles={result['n_obstacles']} turns={result['turn_engagements']} "
-                f"brakes={result['brake_engagements']} final=({result['final_x']},{result['final_y']})"
-            )
-        else:
-            print(
-                f"[OK]        seed={episode_seed} steps={result['steps']} "
-                f"n_obstacles={result['n_obstacles']} turns={result['turn_engagements']} "
-                f"brakes={result['brake_engagements']}"
-            )
+            if result["collision"]:
+                collisions += 1
+                print(
+                    f"[COLLISION] seed={episode_seed} step={result['steps']} "
+                    f"n_obstacles={result['n_obstacles']} turns={result['turn_engagements']} "
+                    f"brakes={result['brake_engagements']} final=({result['final_x']},{result['final_y']})"
+                )
+            else:
+                print(
+                    f"[OK]        seed={episode_seed} steps={result['steps']} "
+                    f"n_obstacles={result['n_obstacles']} turns={result['turn_engagements']} "
+                    f"brakes={result['brake_engagements']}"
+                )
+    finally:
+        engine.close()
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w", newline="") as f:
@@ -123,6 +125,8 @@ def main() -> None:
     print("----------------------------------------")
     print(f"{args.episodes} episodes, {collisions} collisions ({collision_rate:.1%})")
     print(f"{reacted}/{args.episodes} episodes triggered at least one avoidance reaction")
+    if not args.no_check:
+        print("Every hardware decision matched the golden model")
     print(f"Wrote {args.out}")
 
 

@@ -7,6 +7,7 @@ module tb_fsm_controller;
 
   logic clk = 0;
   logic rst_n;
+  logic step_en = 1;  // every clock is a control step in this unit test
   logic [1:0] ev_left, ev_right;
   logic [1:0] state;
   logic cmd_forward, cmd_turn_left, cmd_turn_right, cmd_brake;
@@ -19,13 +20,15 @@ module tb_fsm_controller;
   ) dut (
       .clk,
       .rst_n,
+      .step_en,
       .ev_left,
       .ev_right,
       .state,
       .cmd_forward,
       .cmd_turn_left,
       .cmd_turn_right,
-      .cmd_brake
+      .cmd_brake,
+      .dbg_brake_timer()
   );
 
   always #(CLK_PERIOD / 2) clk = ~clk;
@@ -163,6 +166,31 @@ module tb_fsm_controller;
     check_timer(BRAKE_CYCLES, "timer freshly loaded on flicker re-entry");
 
     drive(0, 0);
+
+    // --- step_en gating: with step_en low the FSM must freeze completely,
+    // both the state register and a mid-countdown brake timer, no matter
+    // what the event inputs do. This is what lets the AXI-Stream wrapper
+    // advance it exactly once per closed event window.
+    do begin  // let the flicker re-entry brake above run out first
+      @(posedge clk);
+      #1;
+    end while (state != 2'd0);
+    drive(3, 3);
+    step_check(2'd3, "critical front -> BRAKE (step_en gating setup)");
+    check_timer(BRAKE_CYCLES, "timer loaded before step_en drops");
+    @(negedge clk);
+    step_en = 0;
+    drive(0, 0);
+    for (int i = 0; i < 3; i++) begin
+      step_check(2'd3, $sformatf("step_en=0 holds BRAKE %0d", i));
+    end
+    check_timer(BRAKE_CYCLES, "step_en=0 holds brake_timer");
+    @(negedge clk);
+    step_en = 1;
+    for (int i = 0; i < BRAKE_CYCLES; i++) begin
+      step_check(2'd3, $sformatf("step_en=1 resumes countdown %0d", i));
+    end
+    step_check(2'd0, "resumed countdown expires -> FORWARD");
 
     $display("----------------------------------------");
     if (errors == 0) $display("ALL %0d CHECKS PASSED", checks);

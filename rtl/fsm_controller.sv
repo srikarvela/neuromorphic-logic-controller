@@ -5,7 +5,13 @@
 // field of view (ev_left/ev_right, higher = more looming activity = closer
 // obstacle) and reacts by steering away from the busier side. A burst on
 // both sides at once means something is dead ahead, so the FSM brakes for
-// a fixed number of cycles before re-evaluating.
+// a fixed number of control steps before re-evaluating.
+//
+// One "control step" is one clock edge with step_en high. In the unit
+// testbench step_en is tied high so every clock is a step; in the
+// AXI-Stream pipeline (rtl/nlc_axis_top.sv) it pulses once per closed
+// event window, so the FSM sees one fresh event-rate reading per window
+// and BRAKE_CYCLES counts windows, not fabric clocks.
 module fsm_controller #(
     parameter int EV_WIDTH        = 2,  // event-rate bucket width (0..2**EV_WIDTH-1)
     parameter int OBSTACLE_THRESH = 2,  // bucket value that counts as "obstacle this side"
@@ -14,6 +20,7 @@ module fsm_controller #(
 ) (
     input  logic                clk,
     input  logic                rst_n,
+    input  logic                step_en,   // advance one control step this edge
     input  logic [EV_WIDTH-1:0] ev_left,
     input  logic [EV_WIDTH-1:0] ev_right,
 
@@ -21,7 +28,11 @@ module fsm_controller #(
     output logic        cmd_forward,
     output logic        cmd_turn_left,
     output logic        cmd_turn_right,
-    output logic        cmd_brake
+    output logic        cmd_brake,
+
+    // Observability only: the brake countdown, so a wrapper can report it
+    // without a hierarchical reference (which Vivado won't synthesize).
+    output logic [((BRAKE_CYCLES <= 1) ? 1 : $clog2(BRAKE_CYCLES + 1))-1:0] dbg_brake_timer
 );
 
   localparam logic [1:0] FORWARD = 2'd0;
@@ -76,7 +87,7 @@ module fsm_controller #(
     if (!rst_n) begin
       state       <= FORWARD;
       brake_timer <= '0;
-    end else begin
+    end else if (step_en) begin
       state       <= next_state;
       brake_timer <= brake_timer_next;
     end
@@ -86,5 +97,6 @@ module fsm_controller #(
   assign cmd_turn_left  = (state == TURN_L);
   assign cmd_turn_right = (state == TURN_R);
   assign cmd_brake      = (state == BRAKE_S);
+  assign dbg_brake_timer = brake_timer;
 
 endmodule

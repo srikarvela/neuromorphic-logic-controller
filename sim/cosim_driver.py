@@ -1,66 +1,31 @@
 """Hardware-in-the-loop driver.
 
-Python owns the agent/environment physics; the FSM "brain" runs as real
-compiled SystemVerilog, invoked once per control step via `vvp`. See
-docs/architecture.md for how state is carried between invocations.
+Python owns the agent/environment physics and a DVS-style event-camera
+model; the controller "chip" -- windowed event counters plus the FSM -- is
+real RTL, running either under Icarus Verilog or on the PYNQ-Z2's FPGA.
+Each control step, one packet of event words goes in and one decision word
+comes back. See docs/architecture.md.
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import math
-import re
-import subprocess
 import sys
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-
 sys.path.insert(0, str(Path(__file__).parent))
-from agent_sim import (
-    ACTION_NAMES,
-    Agent,
-    Environment,
-    Obstacle,
-    apply_action,
-    check_collision,
-    sense,
-)
+from agent_sim import ACTION_NAMES, Agent, Environment, Obstacle, apply_action, check_collision, sense
+from engines import Engine, add_engine_args, engine_from_args
+from event_camera import EventCamera, EventCameraConfig
+from event_stream import Decision, words_to_bytes
+from golden_model import GoldenPipeline
 
 ROOT = Path(__file__).resolve().parent.parent
-VVP_BIN = ROOT / "build" / "tb_cosim_step.vvp"
-
-RESULT_RE = re.compile(
-    r"RESULT state_out=(\d+) brake_timer_out=(\d+) "
-    r"cmd_forward=(\d) cmd_turn_left=(\d) cmd_turn_right=(\d) cmd_brake=(\d)"
-)
 
 
-def run_fsm_step(state: int, brake_timer: int, ev_left: int, ev_right: int) -> tuple[int, int]:
-    """Invoke the compiled SystemVerilog FSM for exactly one control step."""
-    if not VVP_BIN.exists():
-        raise FileNotFoundError(f"{VVP_BIN} not found -- run scripts/build_cosim.sh first")
-
-    proc = subprocess.run(
-        [
-            "vvp",
-            str(VVP_BIN),
-            f"+state_in={state}",
-            f"+brake_timer_in={brake_timer}",
-            f"+ev_left={ev_left}",
-            f"+ev_right={ev_right}",
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    for line in proc.stdout.splitlines():
-        match = RESULT_RE.search(line)
-        if match:
-            return int(match.group(1)), int(match.group(2))
-    raise RuntimeError(f"no RESULT line in vvp output:\n{proc.stdout}\n{proc.stderr}")
+class ParityError(RuntimeError):
+    pass
 
 
 def build_default_environment() -> Environment:
@@ -76,30 +41,68 @@ def build_default_environment() -> Environment:
     )
 
 
-def run_episode(max_steps: int = 200, log_path: Path | None = None):
+def check_decision(step: int, hw: Decision, golden: Decision | None, expected_buckets: tuple[int, int] | None) -> None:
+    """Cross-check one hardware decision against the golden model and the sensor model."""
+    if golden is not None and hw != golden:
+        raise ParityError(f"step {step}: hardware decision {hw} != golden model {golden}")
+    if expected_buckets is not None and (hw.ev_left, hw.ev_right) != expected_buckets:
+        raise ParityError(
+            f"step {step}: hardware quantized events to {(hw.ev_left, hw.ev_right)}, "
+            f"software rate model says {expected_buckets}"
+        )
+
+
+def run_episode(
+    engine: Engine,
+    env: Environment | None = None,
+    max_steps: int = 200,
+    log_path: Path | None = None,
+    camera: EventCamera | None = None,
+    check: bool = True,
+    record: list[int] | None = None,
+) -> tuple[list[dict], Environment]:
+    """One closed-loop episode. Returns the per-step log and the environment.
+
+    With `check`, every decision is compared against the golden model fed
+    the identical packet, and its quantized buckets against the rate-fed
+    sensor model (only meaningful with a noise-free camera). If `record`
+    is given, the event words of every step are appended to it (a replay
+    stream for sim/replay_bench.py).
+    """
     agent = Agent()
-    env = build_default_environment()
+    env = env if env is not None else build_default_environment()
+    camera = camera if camera is not None else EventCamera()
+    golden = GoldenPipeline() if check else None
+    noise_free = camera.config.noise_rate == 0.0
 
-    state = 0
-    brake_timer = 0
+    engine.reset()
+    if golden is not None:
+        golden.reset()
+
     log: list[dict] = []
-
     for step in range(max_steps):
-        ev_left, ev_right = sense(agent, env)
-        state, brake_timer = run_fsm_step(state, brake_timer, ev_left, ev_right)
-        apply_action(agent, state)
+        words = camera.sense(agent, env, step)
+        if record is not None:
+            record.extend(words)
+        decision = engine.step(words)
+        if check:
+            check_decision(step, decision, golden.step(words), sense(agent, env) if noise_free else None)
 
+        apply_action(agent, decision.state)
         log.append(
             {
                 "step": step,
                 "x": agent.x,
                 "y": agent.y,
                 "heading_deg": math.degrees(agent.heading),
-                "ev_left": ev_left,
-                "ev_right": ev_right,
-                "state": state,
-                "action": ACTION_NAMES[state],
-                "brake_timer": brake_timer,
+                "ev_left": decision.ev_left,
+                "ev_right": decision.ev_right,
+                "state": decision.state,
+                "action": ACTION_NAMES[decision.state],
+                "brake_timer": decision.brake_timer,
+                "events_left": decision.count_left,
+                "events_right": decision.count_right,
+                "events_sent": len(words),
             }
         )
 
@@ -110,7 +113,6 @@ def run_episode(max_steps: int = 200, log_path: Path | None = None):
 
     if log_path is not None:
         write_csv(log, log_path)
-
     return log, env
 
 
@@ -123,7 +125,27 @@ def write_csv(log: list[dict], path: Path) -> None:
     print(f"Wrote {len(log)} rows to {path}")
 
 
-def plot_trajectory(log: list[dict], env: Environment, path: Path) -> None:
+def write_replay(words: list[int], log: list[dict], stem: Path) -> None:
+    """Replay stream: all packets concatenated (TLAST only at the very end)
+    plus the per-window decisions the hardware produced in closed loop."""
+    stem.parent.mkdir(parents=True, exist_ok=True)
+    bin_path = stem.with_suffix(".bin")
+    bin_path.write_bytes(words_to_bytes(words))
+    csv_path = stem.with_suffix(".expected.csv")
+    with csv_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["step", "ev_left", "ev_right", "state", "brake_timer"])
+        writer.writeheader()
+        for row in log:
+            writer.writerow({k: row[k] for k in writer.fieldnames})
+    print(f"Wrote replay stream {bin_path} ({len(words)} words, {len(log)} windows) and {csv_path}")
+
+
+def plot_trajectory(log: list[dict], env: Environment, path: Path, title_suffix: str = "") -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     path.parent.mkdir(parents=True, exist_ok=True)
     xs = [row["x"] for row in log]
     ys = [row["y"] for row in log]
@@ -141,7 +163,7 @@ def plot_trajectory(log: list[dict], env: Environment, path: Path) -> None:
 
     ax.set_xlabel("x")
     ax.set_ylabel("y")
-    ax.set_title("Neuromorphic FSM controller: agent trajectory")
+    ax.set_title("Neuromorphic FSM controller: agent trajectory" + title_suffix)
     ax.legend()
     ax.set_aspect("equal", adjustable="datalim")
     fig.tight_layout()
@@ -150,9 +172,41 @@ def plot_trajectory(log: list[dict], env: Environment, path: Path) -> None:
 
 
 def main() -> None:
-    log, env = run_episode(max_steps=45, log_path=ROOT / "results" / "trajectory_log.csv")
-    plot_trajectory(log, env, ROOT / "results" / "trajectory.png")
-    print(f"Episode length: {len(log)} steps")
+    parser = argparse.ArgumentParser(description=__doc__)
+    add_engine_args(parser)
+    parser.add_argument("--max-steps", type=int, default=45)
+    parser.add_argument("--noise", type=float, default=0.0,
+                        help="mean background DVS events per hemisphere per window (default 0)")
+    parser.add_argument("--camera-seed", type=int, default=0)
+    parser.add_argument("--record", type=Path, default=None,
+                        help="also write a replay stream (<path>.bin + <path>.expected.csv)")
+    parser.add_argument("--out-dir", type=Path, default=ROOT / "results")
+    args = parser.parse_args()
+
+    camera = EventCamera(EventCameraConfig(noise_rate=args.noise), seed=args.camera_seed)
+    record: list[int] | None = [] if args.record is not None else None
+
+    engine = engine_from_args(args)
+    try:
+        print(f"Engine: {engine.name}")
+        log, env = run_episode(
+            engine,
+            max_steps=args.max_steps,
+            log_path=args.out_dir / "trajectory_log.csv",
+            camera=camera,
+            check=not args.no_check,
+            record=record,
+        )
+    finally:
+        engine.close()
+
+    plot_trajectory(log, env, args.out_dir / "trajectory.png", f" ({engine.name})")
+    if record is not None:
+        write_replay(record, log, args.record)
+    total_events = sum(row["events_sent"] for row in log)
+    print(f"Episode length: {len(log)} steps, {total_events} event words streamed")
+    if not args.no_check:
+        print("Every decision matched the golden model" + (" and the rate-fed sensor model" if args.noise == 0 else ""))
 
 
 if __name__ == "__main__":

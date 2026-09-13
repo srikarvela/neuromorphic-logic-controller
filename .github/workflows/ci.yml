@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  rtl-and-sim:
+  rtl-and-hil:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,20 +23,33 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r sim/requirements.txt
 
-      - name: Run FSM unit tests
+      - name: RTL unit testbenches (FSM, windowed counter, AXI-Stream pipeline)
         run: make unit-tb
 
-      - name: Run one closed-loop cosim episode
+      - name: Parity + model tests (event pipeline == rate-fed FSM, RTL == golden)
+        run: make test
+
+      - name: Closed-loop HIL episode against the RTL under Icarus
         run: make cosim
 
-      - name: Run a quick randomized stress-test smoke check
+      - name: Single-packet replay through the pipeline
+        run: python3 sim/replay_bench.py --repeat 1
+
+      - name: Randomized stress-test smoke check
         run: ./scripts/run_stress_test.sh --episodes 5 --seed 0
 
-      - name: Upload trajectory plot
+      - name: Noisy-sensor smoke check
+        run: python3 sim/stress_test.py --episodes 3 --seed 100 --noise 10 --out results/stress_noise.csv
+
+      - name: Upload cosim results
         uses: actions/upload-artifact@v4
         with:
           name: cosim-results
           path: results/
+
+  # Vivado synthesis and the PYNQ-Z2 run are not reproducible on a hosted
+  # runner (multi-GB proprietary toolchain, physical board); see
+  # docs/pynq_bringup.md for the on-hardware checklist.
 
   web:
     runs-on: ubuntu-latest

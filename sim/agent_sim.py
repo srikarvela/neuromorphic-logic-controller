@@ -1,10 +1,14 @@
 """2D agent + environment used to drive the neuromorphic FSM controller.
 
-The "sensor" here is a coarse stand-in for an event camera: instead of
-simulating individual pixel-level brightness-change events, we compute a
-looming proxy per hemisphere (left/right half of the field of view) from
-obstacle distance and bearing, and quantize it into the same 0-3 event-rate
-buckets the FSM expects on ev_left/ev_right.
+The geometry here produces a looming proxy per hemisphere (left/right half
+of the field of view) from obstacle distance and bearing. Two consumers
+turn that into sensor output:
+
+- `sense()` quantizes it straight into the 0-3 event-rate buckets the FSM
+  expects on ev_left/ev_right (the original rate-fed model, still used by
+  the web port and as the parity reference).
+- `sim/event_camera.py` turns it into a stream of DVS-style pixel events
+  whose per-window *count* the hardware quantizes into those same buckets.
 """
 from __future__ import annotations
 
@@ -48,22 +52,32 @@ class Environment:
     sense_range: float = 12.0
 
 
-def sense(agent: Agent, env: Environment) -> tuple[int, int]:
-    """Return (ev_left, ev_right) event-rate buckets in [0, 3].
+@dataclass
+class HemisphereReading:
+    """Strongest looming stimulus on one half of the field of view."""
+
+    intensity: float = 0.0  # 0..1, closer = higher
+    bearing: float = 0.0  # radians from heading, +ccw, of the dominant obstacle
+    angular_radius: float = 0.0  # apparent half-angle of that obstacle
+
+
+def sense_readings(agent: Agent, env: Environment) -> tuple[HemisphereReading, HemisphereReading]:
+    """Per-hemisphere looming readings.
 
     For each obstacle within the sensor's field of view and range, compute
-    a looming intensity that grows as the obstacle gets closer, then bucket
-    the strongest reading on each hemisphere into 0..3. Positive bearing
+    a looming intensity that grows as the obstacle gets closer, and keep
+    the strongest reading on each hemisphere. Positive bearing
     (counterclockwise from heading) is the left hemisphere.
     """
     half_fov = env.fov / 2.0
-    left_intensity = 0.0
-    right_intensity = 0.0
+    left = HemisphereReading()
+    right = HemisphereReading()
 
     for obs in env.obstacles:
         dx = obs.x - agent.x
         dy = obs.y - agent.y
-        dist = max(math.hypot(dx, dy) - obs.radius - agent.radius, 0.0)
+        centre_dist = math.hypot(dx, dy)
+        dist = max(centre_dist - obs.radius - agent.radius, 0.0)
         if dist > env.sense_range:
             continue
 
@@ -73,13 +87,21 @@ def sense(agent: Agent, env: Environment) -> tuple[int, int]:
 
         proximity = 1.0 - (dist / env.sense_range)  # 0..1, closer = higher
         intensity = proximity ** 2
+        angular_radius = math.atan2(obs.radius, max(centre_dist, 1e-6))
 
-        if bearing >= 0:
-            left_intensity = max(left_intensity, intensity)
-        else:
-            right_intensity = max(right_intensity, intensity)
+        side = left if bearing >= 0 else right
+        if intensity > side.intensity:
+            side.intensity = intensity
+            side.bearing = bearing
+            side.angular_radius = angular_radius
 
-    return _bucket(left_intensity), _bucket(right_intensity)
+    return left, right
+
+
+def sense(agent: Agent, env: Environment) -> tuple[int, int]:
+    """Return (ev_left, ev_right) event-rate buckets in [0, 3]."""
+    left, right = sense_readings(agent, env)
+    return _bucket(left.intensity), _bucket(right.intensity)
 
 
 def _bucket(intensity: float) -> int:

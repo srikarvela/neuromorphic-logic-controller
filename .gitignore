@@ -16,6 +16,20 @@ build/*.vcd
 # cosim outputs
 results/*.csv
 results/*.png
+results/*.bin
+results/board/
+
+# Vivado
+fpga/vivado/
+fpga/build/
+*.bit
+*.hwh
+.Xil/
+vivado*.log
+vivado*.jou
+
+# pytest
+.pytest_cache/
 
 # Python
 __pycache__/
