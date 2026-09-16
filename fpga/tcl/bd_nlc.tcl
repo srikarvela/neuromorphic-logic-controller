@@ -39,10 +39,11 @@ set_property -dict [list \
     CONFIG.c_sg_length_width {23} \
 ] [get_bd_cells axi_dma_0]
 
-# --- The event pipeline itself, instantiated straight from rtl/nlc_axis_top.sv.
-#     Vivado infers the s_axis/m_axis AXI4-Stream interfaces from the
-#     X_INTERFACE_INFO attributes on its ports.
-create_bd_cell -type module -reference nlc_axis_top nlc_0
+# --- The event pipeline itself, via rtl/nlc_axis_top_wrap.v (module
+#     references must have a Verilog/VHDL top; the wrapper just passes
+#     through to rtl/nlc_axis_top.sv). Vivado infers the s_axis/m_axis
+#     AXI4-Stream interfaces from the X_INTERFACE_INFO attributes on its ports.
+create_bd_cell -type module -reference nlc_axis_top_wrap nlc_0
 
 # --- Streams
 connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXIS_MM2S] [get_bd_intf_pins nlc_0/s_axis]

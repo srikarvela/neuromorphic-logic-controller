@@ -24,6 +24,8 @@ fpga/vivado/
 fpga/build/
 *.bit
 *.hwh
+!fpga/prebuilt/*.bit
+!fpga/prebuilt/*.hwh
 .Xil/
 vivado*.log
 vivado*.jou

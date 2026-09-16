@@ -237,9 +237,12 @@ save/restore, no testbench backdoor of any kind — the original per-step
 
 `fpga/tcl/bd_nlc.tcl` builds the block design: `processing_system7` (board
 preset, 100 MHz `FCLK_CLK0`, `S_AXI_HP0` enabled) → `axi_dma_0` in simple
-mode with 32-bit streams → `nlc_axis_top` instantiated as an RTL module
-reference (its `X_INTERFACE_INFO` attributes let Vivado infer the two
-AXI4-Stream interfaces). Per control step the driver arms S2MM for one
+mode with 32-bit streams → the pipeline instantiated as an RTL module
+reference. IP Integrator refuses a SystemVerilog file as a module-reference
+top (`[filemgmt 56-195]`), so the reference points at
+`rtl/nlc_axis_top_wrap.v`, a plain Verilog shell that re-declares the ports
+with their `X_INTERFACE_INFO` attributes (which let Vivado infer the two
+AXI4-Stream interfaces) and instantiates `nlc_axis_top` unchanged. Per control step the driver arms S2MM for one
 word, sends the packet over MM2S, waits for both channels (with a timeout,
 since a malformed packet that never produces a TLAST decision would
 otherwise hang `wait()` forever) and unpacks the word. Replay mode arms
@@ -259,6 +262,35 @@ boundaries alone. `tb/tb_nlc_axis_top.sv` scenario B and
 simulation. On the board this is the pure-pipeline throughput number (DMA
 in, DMA out, no Python in the loop per window); under Icarus it only proves
 the mechanism.
+
+### FPGA implementation results
+
+Vivado 2024.1, `xc7z020clg400-1`, 100 MHz. Reports in `fpga/prebuilt/`.
+
+| | LUTs | FFs | BRAM | timing |
+|---|---|---|---|---|
+| `nlc_axis_top` | 106 | 108 | 0 | 4.08 ns slack out of context (Fmax ≈ 169 MHz, post-synthesis estimate) |
+| whole overlay | 2756 | 3618 | 2 | 1.25 ns slack post-route; worst path is in the AXI interconnect's width upsizer (DMA 32-bit → HP0 64-bit) |
+
+The remaining warnings are the usual ones from the generated interconnect
+and DMA IP (AXI ID width truncation on HP0, empty CDC waivers, unused
+clock/reset ports on pass-through couplers); none originate in the
+pipeline RTL. The prebuilt overlay was produced without the TUL board
+files, so its PS7 block carries Vivado's default DDR/MIO configuration —
+see `docs/pynq_bringup.md`.
+
+## Noise robustness: `sim/noise_sweep.py`
+
+Adds Poisson background events (mean λ per hemisphere per window) and runs
+100 random courses per λ with the RTL in the loop, measuring the fraction
+of windows whose bucket differs from the noise-free sensor model, the
+fraction of clear-path windows spent turning or braking, and the collision
+rate. The fixed thresholds tolerate λ ≤ 10 (under 3% of buckets change, no
+collisions). From λ ≈ 20 noise alone reaches bucket 1, from ≈ 50 bucket 2
+(false turns), and from ≈ 80 both sides reach bucket 3 together (false
+brakes; the one-window brake-expiry flicker then lets the agent creep into
+obstacles, 34% collisions at λ = 100). A background-activity filter ahead of
+the counters is the natural next pipeline stage.
 
 ## Sensor model: `sim/event_camera.py`
 
@@ -309,13 +341,15 @@ interface still leaves room for a WASM build of the RTL later.
 
 ```
 rtl/       fsm_controller.sv, event_rate_window.sv, nlc_axis_top.sv  (synthesizable)
+           nlc_axis_top_wrap.v (Verilog shell for IP Integrator)
 tb/        three unit testbenches + the persistent cosim server
 sim/       agent physics, event camera, wire format, golden model, engines,
-           cosim driver, stress test, replay bench, pytest suites, golden CSVs
+           cosim driver, stress test, noise sweep, replay bench, pytest suites,
+           golden CSVs
 board/pynq/ PYNQ-Z2 engine (AXI DMA driver)
-fpga/      Vivado block design + build/OOC-synthesis Tcl, XDC
-scripts/   iverilog/vvp wrappers
-docs/      this file, docs/pynq_bringup.md
+fpga/      Vivado block design + build/OOC-synthesis Tcl, XDC, prebuilt overlay
+scripts/   iverilog/vvp wrappers, Parallels Vivado runner
+docs/      this file, docs/pynq_bringup.md, figure generator + images
 build/     compiled .vvp and .vcd (gitignored)
 results/   CSV logs, plots, replay streams (gitignored)
 web/       browser visualization (React + Vite + TS)

@@ -27,11 +27,13 @@ if {[catch {set_property board_part $board [current_project]} msg]} {
     puts "WARNING: PYNQ-Z2 board files not found ($msg); continuing with bare part $part"
 }
 
-# RTL: the same three files the Icarus testbenches use, nothing else.
+# RTL: the same three files the Icarus testbenches use, plus the plain
+# Verilog shell IP Integrator needs as a module-reference top.
 add_files -norecurse [list \
     "$root/rtl/fsm_controller.sv" \
     "$root/rtl/event_rate_window.sv" \
     "$root/rtl/nlc_axis_top.sv" \
+    "$root/rtl/nlc_axis_top_wrap.v" \
 ]
 set_property file_type SystemVerilog [get_files *.sv]
 add_files -fileset constrs_1 -norecurse "$root/fpga/constraints/pynq_z2.xdc"

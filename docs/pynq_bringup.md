@@ -1,18 +1,25 @@
 # PYNQ-Z2 bring-up
 
-Everything below the "Board" line has not yet been run from this checkout:
-the Vivado flow and the DMA driver follow the same conventions as the
-crypto feed handler's, but the first `make bitstream` / `make board-smoke`
-is still to do. Treat this as the checklist for that session and fill in
-the numbers in the README when it's done.
+Status: the Vivado flow is done — `fpga/prebuilt/nlc.bit` + `nlc.hwh` were
+built from this repo with Vivado 2024.1 (timing met at 100 MHz, 0 critical
+warnings). The on-board steps below (deploy, smoke, cosim, stress, bench)
+have not been run yet; this is the checklist for that session.
 
 ## Prerequisites
 
-- Vivado 2022.2 or newer (Vitis HLS not needed — the pipeline is plain RTL).
-- TUL PYNQ-Z2 board files installed in Vivado (`tul.com.tw:pynq-z2:part0:1.0`).
-  Without them `build_bitstream.tcl` warns and continues with the bare
-  `xc7z020clg400-1`; the PS7 then needs the board's DDR/MIO preset applied
-  by hand in the block design, so install the files.
+- Vivado 2022.2 or newer; the free ML Standard edition covers the XC7Z020
+  (Vitis HLS not needed — the pipeline is plain RTL). Tested with 2024.1.
+- TUL PYNQ-Z2 board files installed in Vivado (`tul.com.tw:pynq-z2:part0:1.0`),
+  recommended. Without them `build_bitstream.tcl` warns and continues with
+  the bare `xc7z020clg400-1` part: the design still builds (that is how the
+  prebuilt overlay was made), but the PS7 block carries Vivado's default
+  DDR/MIO settings instead of the board preset. Under PYNQ the PS is
+  configured at boot by the image and an overlay load only programs the
+  fabric and applies the `.hwh` clock settings, so this should not matter —
+  but rebuild with the board files before calling the overlay final.
+- Apple Silicon Mac: Vivado is x86-64 only. A Parallels Windows 11 (ARM) VM
+  with Vivado installed works under Windows' x86 emulation;
+  `make vm-bitstream` drives it from macOS (see below).
 - A PYNQ-Z2 running the PYNQ image (v2.7 or v3.x), reachable over ssh as
   `xilinx@pynq` (override with `BOARD_HOST=...` on every `make board-*`).
 
@@ -24,9 +31,31 @@ make bitstream    # full PS + DMA + pipeline design, ~10-15 min
 ```
 
 `make bitstream` leaves `fpga/build/nlc.bit`, `fpga/build/nlc.hwh`,
-`timing_summary.rpt` and `utilization.rpt`. The pipeline is a few hundred
-LUTs and runs on the 100 MHz PS fabric clock; timing should close with
-lots of margin — check `Worst setup slack` in the Vivado log.
+`timing_summary.rpt` and `utilization.rpt`. Reference numbers from the
+prebuilt overlay: pipeline 106 LUT / 108 FF, whole design 2756 LUT /
+3618 FF / 2 BRAM, worst setup slack 1.25 ns at 100 MHz.
+
+### From a Mac, through Parallels
+
+```bash
+make vm-ooc          # OOC synthesis in the VM, ~2 min
+make vm-bitstream    # full build in the VM, ~15 min under emulation
+```
+
+`scripts/vivado_in_parallels.sh` zips `git HEAD` (commit first) into a
+Parallels shared folder, unzips it to `C:\nlc` in the VM, runs Vivado via
+`prlctl exec --current-user`, and copies the outputs back to `fpga/build/`.
+Override the VM name, Vivado path and shared-folder mapping with the
+`NLC_*` variables documented at the top of the script. Requires Parallels
+Desktop Pro/Business (for `prlctl exec`) and Parallels Tools in the guest.
+
+Under Windows-on-ARM emulation, Vivado intermittently fails to read its own
+data files while `create_bd_design` loads the IP catalog (`couldn't read
+file .../busdef.tcl`, `find_approot_file ... xguifrmwork/init.tcl`). The
+files are there; a rerun usually succeeds (2 of 4 runs failed this way
+during bring-up). The script retries these automatically and stops on any
+other error. Excluding `C:\Xilinx` from Windows Defender real-time scanning
+may reduce them — that is a security setting to change yourself, if at all.
 
 What the block design contains (`fpga/tcl/bd_nlc.tcl`):
 
@@ -42,6 +71,9 @@ What the block design contains (`fpga/tcl/bd_nlc.tcl`):
 ```bash
 make board-deploy     # rsync repo (minus web/, build/, results/) + nlc.bit/.hwh to ~/nlc on the board
 ```
+
+The overlay comes from `fpga/build/` if you built one, otherwise from
+`fpga/prebuilt/`.
 
 ## 3. Smoke test, then the real thing
 
@@ -95,10 +127,7 @@ when a plot is written, so `cosim_driver.py` works without it.
 
 ## Numbers to fill in after the first board run
 
-In `README.md` under "Results":
+In `README.md` under "Results → On the board":
 
-- Fmax / worst slack and LUT/FF count for `nlc_axis_top` (from
-  `fpga/build/ooc_timing.rpt`, `ooc_utilization.rpt`), and for the whole
-  design (`timing_summary.rpt`, `utilization.rpt`).
-- `make board-bench`: words/s, decisions/s and us/window through the DMA.
+- `make board-bench`: words/s, decisions/s and µs/window through the DMA.
 - `make board-cosim` / `board-stress`: the parity statements above, confirmed.
